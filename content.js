@@ -65,22 +65,39 @@
 
     // Handle capture button click
     async function handleCapture() {
-        // Check if modal already exists
+        const button = document.getElementById('insta-logger-btn');
+        button.classList.add('loading');
+
+        // STEP 1: Capture screenshot IMMEDIATELY (Stored in Background memory)
+        chrome.runtime.sendMessage({ action: 'getScreenshot' }, (response) => {
+            button.classList.remove('loading');
+
+            if (!response || !response.success) {
+                showNotification('Failed to capture: ' + (response.error || 'Unknown error'), 'error');
+                return;
+            }
+
+            // STEP 2: Show the modal (background is holding the image)
+            showTitleModal();
+        });
+    }
+
+    // Modal logic (no longer needs to handle the giant image string)
+    function showTitleModal() {
         if (document.getElementById('insta-logger-msg-modal')) return;
 
-        // Create a custom modal for the title
         const modal = document.createElement('div');
         modal.id = 'insta-logger-msg-modal';
         modal.innerHTML = `
-      <div class="insta-logger-modal-content">
-        <h3>Enter Title for this Reel</h3>
-        <input type="text" id="insta-logger-title-input" placeholder="Enter title..." autofocus>
-        <div class="insta-logger-modal-btns">
-          <button id="insta-logger-modal-cancel">Cancel</button>
-          <button id="insta-logger-modal-save">Capture & Save</button>
-        </div>
-      </div>
-    `;
+            <div class="insta-logger-modal-content">
+                <h3>Enter Title for this Reel</h3>
+                <input type="text" id="insta-logger-title-input" placeholder="Enter title..." autofocus>
+                <div class="insta-logger-modal-btns">
+                    <button id="insta-logger-modal-cancel">Cancel</button>
+                    <button id="insta-logger-modal-save">Capture & Save</button>
+                </div>
+            </div>
+        `;
         document.body.appendChild(modal);
 
         const input = modal.querySelector('#insta-logger-title-input');
@@ -88,47 +105,33 @@
         const cancelBtn = modal.querySelector('#insta-logger-modal-cancel');
 
         input.focus();
-
-        const closeModal = () => {
-            modal.remove();
-        };
-
+        const closeModal = () => modal.remove();
         cancelBtn.onclick = closeModal;
 
         saveBtn.onclick = async () => {
             const title = input.value.trim() || 'Untitled Reel';
             closeModal();
 
-            const button = document.getElementById('insta-logger-btn');
-            button.classList.add('loading');
+            // STEP 3: Tell background to save with this title
+            const currentUrl = window.location.href;
+            const now = new Date();
+            const timestamp = formatDateTime(now);
 
-            try {
-                const currentUrl = window.location.href;
-                const now = new Date();
-                const timestamp = formatDateTime(now);
-
-                chrome.runtime.sendMessage({
-                    action: 'captureScreenshot',
-                    url: currentUrl,
-                    timestamp: timestamp,
-                    title: title
-                }, (response) => {
-                    if (response && response.success) {
-                        showNotification('Reel logged: ' + title, 'success');
-                        updateCounter();
-                    } else {
-                        showNotification('Failed to log Reel', 'error');
-                    }
-                    button.classList.remove('loading');
-                });
-            } catch (error) {
-                console.error('Error capturing:', error);
-                showNotification('Error: ' + error.message, 'error');
-                button.classList.remove('loading');
-            }
+            chrome.runtime.sendMessage({
+                action: 'saveLog',
+                url: currentUrl,
+                timestamp: timestamp,
+                title: title
+            }, (saveResponse) => {
+                if (saveResponse && saveResponse.success) {
+                    showNotification('Reel logged: ' + title, 'success');
+                    updateCounter();
+                } else {
+                    showNotification('Error saving log entry', 'error');
+                }
+            });
         };
 
-        // Also allow Enter key to save
         input.onkeyup = (e) => {
             if (e.key === 'Enter') saveBtn.onclick();
             if (e.key === 'Escape') closeModal();

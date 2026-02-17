@@ -1,48 +1,61 @@
 // Background service worker
+let lastCapturedImage = null;
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'captureScreenshot') {
-        handleCaptureScreenshot(request, sender, sendResponse);
-        return true; // Keep message channel open for async response
+    if (request.action === 'getScreenshot') {
+        handleGetScreenshot(sender, sendResponse);
+        return true;
+    } else if (request.action === 'saveLog') {
+        handleSaveLog(request, sendResponse);
+        return true;
     } else if (request.action === 'downloadCSV') {
         handleDownloadCSV(sendResponse);
         return true;
     }
 });
 
-// Capture screenshot and store data
-async function handleCaptureScreenshot(request, sender, sendResponse) {
+// Step 1: Capture and store locally in the background script
+async function handleGetScreenshot(sender, sendResponse) {
     try {
-        // Capture visible tab as data URL
-        const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, {
-            format: 'png',
-            quality: 90
+        lastCapturedImage = await chrome.tabs.captureVisibleTab(sender.tab.windowId, {
+            format: 'jpeg',
+            quality: 70
         });
-
-        // Get existing logs
-        const result = await chrome.storage.local.get(['reelsLog']);
-        const logs = result.reelsLog || [];
-
-        // Add new entry
-        const newEntry = {
-            image: dataUrl,
-            url: request.url,
-            timestamp: request.timestamp,
-            title: request.title || 'Untitled Reel'
-        };
-
-        logs.push(newEntry);
-
-        // Save back to storage
-        await chrome.storage.local.set({ reelsLog: logs });
-
         sendResponse({ success: true });
     } catch (error) {
-        console.error('Error capturing screenshot:', error);
+        console.error('Error capturing:', error);
         sendResponse({ success: false, error: error.message });
     }
 }
 
-// Download CSV file (Single File using Blob)
+// Step 2: Combine the stored image with the provided title and save
+async function handleSaveLog(request, sendResponse) {
+    try {
+        if (!lastCapturedImage) {
+            throw new Error('No screenshot found in memory');
+        }
+
+        const result = await chrome.storage.local.get(['reelsLog']);
+        const logs = result.reelsLog || [];
+
+        logs.push({
+            image: lastCapturedImage,
+            url: request.url,
+            timestamp: request.timestamp,
+            title: request.title
+        });
+
+        await chrome.storage.local.set({ reelsLog: logs });
+
+        lastCapturedImage = null;
+        sendResponse({ success: true });
+    } catch (error) {
+        console.error('Error saving:', error);
+        sendResponse({ success: false, error: error.message });
+    }
+}
+
+// Download Premium Interactive Sheet (Single HTML file)
 async function handleDownloadCSV(sendResponse) {
     try {
         const result = await chrome.storage.local.get(['reelsLog']);
@@ -53,90 +66,113 @@ async function handleDownloadCSV(sendResponse) {
             return;
         }
 
-        // Generate CSV content (full data URLs)
-        const csvContent = generateCSV(logs);
+        const sheetContent = generatePremiumSheetHTML(logs);
 
-        // Create offscreen document if it doesn't exist
         await chrome.offscreen.createDocument({
             url: 'offscreen.html',
             reasons: ['BLOBS'],
-            justification: 'To generate large CSV files for download'
-        }).catch(() => { }); // Ignore error if already exists
+            justification: 'To generate large export files'
+        }).catch(() => { });
 
-        // Get Blob URL from offscreen
         const response = await chrome.runtime.sendMessage({
             target: 'offscreen',
             type: 'create-blob-url',
-            data: csvContent
+            data: sheetContent,
+            mimeType: 'text/html'
         });
 
         if (response.error) throw new Error(response.error);
 
-        // Generate filename
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
-        const filename = `insta_logger_${dateStr}.csv`;
+        const filename = `insta_reels_log_${dateStr}.html`;
 
-        // Download the single large file
         await chrome.downloads.download({
             url: response.url,
             filename: filename,
-            saveAs: true // Only ONE prompt for the whole file
+            saveAs: true
         });
 
-        // Close offscreen doc
         await chrome.offscreen.closeDocument().catch(() => { });
-
         sendResponse({ success: true });
     } catch (error) {
-        console.error('Error downloading CSV:', error);
+        console.error('Error downloading:', error);
         sendResponse({ success: false, error: error.message });
     }
 }
 
-// Generate CSV from logs
-function generateCSV(logs) {
-    // CSV header
-    let csv = 'Title,Image Data URL,Share Link,Date-Time\n';
-
-    // Add each log entry
-    logs.forEach(log => {
-        // Escape fields for CSV (handle commas and quotes)
-        const title = escapeCSVField(log.title || 'Untitled Reel');
-        const imageData = escapeCSVField(log.image);
-        const url = escapeCSVField(log.url);
-        const timestamp = escapeCSVField(log.timestamp);
-
-        csv += `${title},${imageData},${url},${timestamp}\n`;
-    });
-
-    return csv;
+// Generate a beautifully styled HTML file that acts like a spreadsheet
+function generatePremiumSheetHTML(logs) {
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Instagram Reels Log Export</title>
+        <style>
+            body { font-family: -apple-system, sans-serif; background: #f9fafb; padding: 40px; color: #1f2937; }
+            .header { margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; }
+            h1 { margin: 0; font-size: 24px; color: #111827; }
+            .stats { color: #6b7280; font-size: 14px; }
+            table { width: 100%; border-collapse: separate; border-spacing: 0; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+            th { background: #f3f4f6; padding: 16px; text-align: left; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #374151; border-bottom: 1px solid #e5e7eb; }
+            td { padding: 16px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+            tr:last-child td { border-bottom: none; }
+            .img-container { width: 140px; border-radius: 8px; overflow: hidden; background: #eee; }
+            img { width: 100%; height: auto; display: block; transition: transform 0.2s; cursor: zoom-in; }
+            img:hover { transform: scale(1.05); }
+            .title-cell { font-weight: 600; color: #111827; font-size: 15px; max-width: 250px; }
+            .link-cell a { color: #4f46e5; text-decoration: none; word-break: break-all; font-size: 13px; }
+            .link-cell a:hover { text-decoration: underline; }
+            .time-cell { color: #6b7280; font-size: 13px; white-space: nowrap; }
+            .badge { padding: 4px 8px; background: #e0e7ff; color: #4338ca; border-radius: 6px; font-size: 12px; font-weight: 500; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div>
+                <h1>📸 Instagram Reels Logs</h1>
+                <p class="stats">Generated on ${new Date().toLocaleString()}</p>
+            </div>
+            <div class="badge">${logs.length} Total Entries</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th width="160">Screenshot</th>
+                    <th>Ref Title</th>
+                    <th>Instagram Link</th>
+                    <th>Date-Time Captured</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${logs.map(log => `
+                <tr>
+                    <td><div class="img-container"><img src="${log.image}"></div></td>
+                    <td class="title-cell">${log.title || 'Untitled'}</td>
+                    <td class="link-cell"><a href="${log.url}" target="_blank">${log.url}</a></td>
+                    <td class="time-cell">${log.timestamp}</td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </body>
+    </html>`;
 }
 
 // Escape CSV field (handle quotes and commas)
 function escapeCSVField(field) {
     if (field == null) return '';
-
     const fieldStr = String(field);
-
-    // If field contains comma, quote, or newline, wrap in quotes and escape quotes
     if (fieldStr.includes(',') || fieldStr.includes('"') || fieldStr.includes('\n')) {
         return '"' + fieldStr.replace(/"/g, '""') + '"';
     }
-
     return fieldStr;
-}
-
-// Clear old data if needed (optional - for maintenance)
-async function clearOldLogs() {
-    await chrome.storage.local.remove(['reelsLog']);
 }
 
 // Listen for extension installation
 chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
-        console.log('Instagram Reels Logger installed');
-        // Initialize storage
         chrome.storage.local.set({ reelsLog: [] });
     }
 });
